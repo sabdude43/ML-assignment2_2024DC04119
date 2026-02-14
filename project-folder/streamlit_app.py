@@ -15,6 +15,13 @@ from sklearn.metrics import (
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
+from pathlib import Path
+
+# Base directory for relative assets (makes paths work regardless of CWD)
+BASE_DIR = Path(__file__).resolve().parent
+
+def rel(path: str) -> str:
+    return str(BASE_DIR / path)
 
 # Configure page
 st.set_page_config(
@@ -55,7 +62,7 @@ with tab1:
     
     # Load results CSV
     try:
-        results_df = pd.read_csv('results/model_comparison.csv', index_col=0)
+        results_df = pd.read_csv(rel('results/model_comparison.csv'), index_col=0)
         
         col1, col2 = st.columns([2, 1])
         
@@ -111,104 +118,240 @@ with tab1:
         st.error("Results file not found. Please run train_models.py first.")
 
 # ============================================================================
-# TAB 2: Make Predictions
+# TAB 2: Make Predictions and Evaluation
 # ============================================================================
 with tab2:
     st.header("Make Predictions with Trained Models")
-    
-    st.markdown("""
-    Enter feature values for a sample to get predictions from all 6 models.
-    The feature values should be normalized diagnostic measurements from breast cancer imaging.
-    """)
-    
-    # Load sample data to show feature names and ranges
+
+    st.markdown(
+        """
+    Enter feature values for a sample to get predictions from all models,
+    or upload a test CSV (features only) to evaluate models and display metrics.
+    """
+    )
+
+    # --- Upload test CSV (features only) for evaluation ---
+    uploaded_file = st.file_uploader(
+        "Upload test CSV (features only). If it contains a target column name it 'target' or 'diagnosis', it will be used.",
+        type=["csv"],
+    )
+
+    def _normalize_target(y_series: pd.Series) -> pd.Series:
+        try:
+            if y_series.dtype == object:
+                s = y_series.astype(str).str.strip().str.lower()
+                mapping = {"m": 0, "malignant": 0, "b": 1, "benign": 1, "0": 0, "1": 1}
+                s = s.map(lambda v: mapping.get(v, v))
+                return pd.to_numeric(s, errors="coerce").astype(int)
+            return pd.to_numeric(y_series, errors="coerce").astype(int)
+        except Exception:
+            return y_series
+
+    if uploaded_file is not None:
+        try:
+            uploaded_df = pd.read_csv(uploaded_file)
+            st.subheader("Uploaded Test Data (first 5 rows)")
+            st.dataframe(uploaded_df.head())
+
+            if "target" in uploaded_df.columns:
+                y_true = uploaded_df["target"]
+                X_eval = uploaded_df.drop(columns=["target"])
+            elif "diagnosis" in uploaded_df.columns:
+                y_true = uploaded_df["diagnosis"]
+                X_eval = uploaded_df.drop(columns=["diagnosis"])
+            else:
+                # Fallback: try to load y_test from data folder
+                if os.path.exists(rel("data/y_test.csv")):
+                    y_true = pd.read_csv(rel("data/y_test.csv")).squeeze()
+                    X_eval = uploaded_df
+                else:
+                    st.error(
+                        "No target column in uploaded file and `data/y_test.csv` not found. Cannot evaluate."
+                    )
+                    X_eval = None
+                    y_true = None
+
+            if X_eval is not None:
+                y_true = _normalize_target(y_true)
+
+                model_options = [
+                    "All Models",
+                    "Logistic Regression",
+                    "Decision Tree",
+                    "KNN",
+                    "Naive Bayes",
+                    "Random Forest",
+                    "XGBoost",
+                ]
+
+                selected_model = st.selectbox("Select model to evaluate", model_options)
+
+                if st.button("Evaluate on uploaded test data"):
+                    try:
+                        scaler = joblib.load(rel("model/scaler.pkl"))
+
+                        # Load models
+                        models_dict = {
+                            "Logistic Regression": joblib.load(
+                                rel("model/logistic_regression_model.pkl")
+                            ),
+                            "Decision Tree": joblib.load(rel("model/decision_tree_model.pkl")),
+                            "KNN": joblib.load(rel("model/knn_model.pkl")),
+                            "Naive Bayes": joblib.load(rel("model/naive_bayes_model.pkl")),
+                            "Random Forest": joblib.load(rel("model/random_forest_model.pkl")),
+                            "XGBoost": joblib.load(rel("model/xgboost_model.pkl")),
+                        }
+
+                        X_scaled = scaler.transform(X_eval)
+
+                        eval_results = {}
+
+                        for name, model in models_dict.items():
+                            if selected_model != "All Models" and name != selected_model:
+                                continue
+
+                            # Try predictions on scaled data, fallback to raw
+                            try:
+                                y_pred = model.predict(X_scaled)
+                                y_prob = model.predict_proba(X_scaled)[:, 1]
+                            except Exception:
+                                y_pred = model.predict(X_eval)
+                                try:
+                                    y_prob = model.predict_proba(X_eval)[:, 1]
+                                except Exception:
+                                    y_prob = np.zeros(len(y_pred))
+
+                            acc = accuracy_score(y_true, y_pred)
+                            prec = precision_score(y_true, y_pred, zero_division=0)
+                            rec = recall_score(y_true, y_pred, zero_division=0)
+                            f1 = f1_score(y_true, y_pred, zero_division=0)
+                            try:
+                                auc = roc_auc_score(y_true, y_prob)
+                            except Exception:
+                                auc = np.nan
+
+                            eval_results[name] = {
+                                "accuracy": acc,
+                                "precision": prec,
+                                "recall": rec,
+                                "f1": f1,
+                                "auc": auc,
+                                "y_pred": y_pred,
+                            }
+
+                        # Display aggregated metrics
+                        res_df = pd.DataFrame.from_dict(eval_results, orient="index").drop(
+                            columns=["y_pred"]
+                        )
+                        st.subheader("Evaluation Metrics")
+                        st.dataframe(res_df.round(4))
+
+                        # Show confusion matrix and classification report for each evaluated model
+                        for name, v in eval_results.items():
+                            st.subheader(f"Confusion Matrix & Report: {name}")
+                            cm = confusion_matrix(y_true, v["y_pred"])
+                            fig, ax = plt.subplots()
+                            sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
+                            ax.set_xlabel("Predicted")
+                            ax.set_ylabel("Actual")
+                            st.pyplot(fig)
+                            st.text(classification_report(y_true, v["y_pred"], zero_division=0))
+
+                    except FileNotFoundError as e:
+                        st.error(f"Model files not found: {e}. Please ensure models are trained.")
+
+        except Exception as e:
+            st.error(f"Failed to read uploaded file: {e}")
+
+    # --- Single-sample sliders and predictions (existing behavior) ---
     try:
-        X_test = pd.read_csv('data/X_test.csv')
+        X_test = pd.read_csv(rel("data/X_test.csv"))
         feature_names = X_test.columns.tolist()
-        
-        st.subheader("Feature Input")
-        
+
+        st.subheader("Feature Input (single sample)")
+
         # Create input fields for features
         col_inputs = st.columns(3)
         user_input = {}
-        
+
         for idx, feature in enumerate(feature_names):
             col_idx = idx % 3
             with col_inputs[col_idx]:
                 min_val = float(X_test[feature].min())
                 max_val = float(X_test[feature].max())
                 mean_val = float(X_test[feature].mean())
-                
+
                 user_input[feature] = st.slider(
                     feature,
                     min_value=min_val,
                     max_value=max_val,
                     value=mean_val,
-                    step=(max_val - min_val) / 100
+                    step=(max_val - min_val) / 100 if max_val > min_val else 0.01,
                 )
-        
+
         if st.button("🔮 Get Predictions from All Models", use_container_width=True):
-            # Load scaler and models
             try:
-                scaler = joblib.load('model/scaler.pkl')
-                
+                scaler = joblib.load(rel("model/scaler.pkl"))
+
                 # Prepare input
                 input_df = pd.DataFrame([user_input])
                 input_scaled = scaler.transform(input_df)
-                
+
                 # Load models
                 models_dict = {
-                    'Logistic Regression': joblib.load('model/logistic_regression_model.pkl'),
-                    'Decision Tree': joblib.load('model/decision_tree_model.pkl'),
-                    'KNN': joblib.load('model/knn_model.pkl'),
-                    'Naive Bayes': joblib.load('model/naive_bayes_model.pkl'),
-                    'Random Forest': joblib.load('model/random_forest_model.pkl'),
-                    'XGBoost': joblib.load('model/xgboost_model.pkl'),
+                    "Logistic Regression": joblib.load(
+                        rel("model/logistic_regression_model.pkl")
+                    ),
+                    "Decision Tree": joblib.load(rel("model/decision_tree_model.pkl")),
+                    "KNN": joblib.load(rel("model/knn_model.pkl")),
+                    "Naive Bayes": joblib.load(rel("model/naive_bayes_model.pkl")),
+                    "Random Forest": joblib.load(rel("model/random_forest_model.pkl")),
+                    "XGBoost": joblib.load(rel("model/xgboost_model.pkl")),
                 }
-                
+
                 st.subheader("Model Predictions")
-                
+
                 # Display predictions in columns
                 col1, col2, col3 = st.columns(3)
                 columns = [col1, col2, col3]
-                
+
                 prediction_results = {}
-                
+
                 for idx, (model_name, model) in enumerate(models_dict.items()):
                     col = columns[idx % 3]
-                    
+
                     # Make prediction
-                    if model_name in ['Logistic Regression', 'KNN', 'Naive Bayes']:
+                    try:
                         prediction = model.predict(input_scaled)[0]
                         probability = model.predict_proba(input_scaled)[0]
-                    else:
+                    except Exception:
                         prediction = model.predict(input_df)[0]
                         probability = model.predict_proba(input_df)[0]
-                    
+
                     prediction_results[model_name] = {
-                        'prediction': prediction,
-                        'malignant_prob': probability[0],
-                        'benign_prob': probability[1]
+                        "prediction": prediction,
+                        "malignant_prob": probability[0],
+                        "benign_prob": probability[1],
                     }
-                    
+
                     with col:
                         st.markdown(f"### {model_name}")
-                        
+
                         diagnosis = "🔴 Malignant" if prediction == 0 else "🟢 Benign"
                         st.markdown(f"**Prediction:** {diagnosis}")
-                        
+
                         # Show probabilities
                         col_prob1, col_prob2 = st.columns(2)
                         with col_prob1:
                             st.metric("Malignant", f"{probability[0]*100:.2f}%")
                         with col_prob2:
                             st.metric("Benign", f"{probability[1]*100:.2f}%")
-                
+
                 # Consensus prediction
                 st.subheader("Model Consensus")
-                predictions = [v['prediction'] for v in prediction_results.values()]
+                predictions = [v["prediction"] for v in prediction_results.values()]
                 consensus = sum(predictions) / len(predictions)
-                
+
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.metric("Models Predicting Benign", sum(predictions))
@@ -217,10 +360,10 @@ with tab2:
                 with col3:
                     consensus_diagnosis = "🟢 BENIGN" if consensus >= 0.5 else "🔴 MALIGNANT"
                     st.metric("Consensus", consensus_diagnosis)
-                
+
             except FileNotFoundError as e:
                 st.error(f"Model files not found: {e}. Please ensure all models are trained.")
-    
+
     except FileNotFoundError:
         st.error("Dataset file not found. Please run load_dataset.py first.")
 
@@ -232,21 +375,21 @@ with tab3:
     
     try:
         # Check if visualization files exist
-        if os.path.exists('results/model_comparison.png'):
+        if os.path.exists(rel('results/model_comparison.png')):
             st.subheader("Model Performance Metrics")
-            st.image('results/model_comparison.png', use_container_width=True)
-        
-        if os.path.exists('results/roc_curves.png'):
+            st.image(rel('results/model_comparison.png'), use_container_width=True)
+
+        if os.path.exists(rel('results/roc_curves.png')):
             st.subheader("ROC Curves Comparison")
-            st.image('results/roc_curves.png', use_container_width=True)
-        
-        if os.path.exists('results/confusion_matrices.png'):
+            st.image(rel('results/roc_curves.png'), use_container_width=True)
+
+        if os.path.exists(rel('results/confusion_matrices.png')):
             st.subheader("Confusion Matrices")
-            st.image('results/confusion_matrices.png', use_container_width=True)
+            st.image(rel('results/confusion_matrices.png'), use_container_width=True)
         
         # Load and display detailed metrics
         st.subheader("Detailed Metrics")
-        results_df = pd.read_csv('results/model_comparison.csv', index_col=0)
+        results_df = pd.read_csv(rel('results/model_comparison.csv'), index_col=0)
         st.dataframe(results_df.round(4), use_container_width=True)
         
         # Download option
