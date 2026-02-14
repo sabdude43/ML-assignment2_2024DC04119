@@ -1,3 +1,24 @@
+
+def rel(path: str) -> str:
+    return str(BASE_DIR / path)
+
+
+st.set_page_config(page_title="Breast Cancer Classification Models",
+                   page_icon="🏥", layout="wide")
+
+
+st.markdown("""
+<style>
+ .main { padding: 20px; }
+ .metric-card { background-color: #f0f2f6; padding: 20px; border-radius: 10px; }
+</style>
+""", unsafe_allow_html=True)
+
+
+st.title("🏥 Breast Cancer Classification Models")
+st.markdown("**Multi-Model Comparison & Prediction System**")
+st.markdown("Binary classification of breast cancer tumors using 6 different ML models")
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -16,6 +37,7 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+
 BASE_DIR = Path(__file__).resolve().parent
 
 
@@ -29,12 +51,24 @@ st.title("Breast Cancer Classification Models")
 
 tabs = st.tabs(["Models", "Predict", "Results", "About"])
 
-# --- Models tab: show metrics CSV if present
+
+# --- Models tab: show metrics CSV if present with model filter
 with tabs[0]:
     st.header("Model Comparison")
     try:
         df = pd.read_csv(rel("results/model_comparison.csv"), index_col=0)
-        st.dataframe(df.round(4))
+        available = df.index.tolist()
+        sel = st.multiselect("Filter models", available, default=available)
+        if sel:
+            df_show = df.loc[[m for m in available if m in sel]]
+        else:
+            df_show = df
+        st.dataframe(df_show.round(4))
+        # simple plot of accuracy for selection
+        fig, ax = plt.subplots(figsize=(8, 3))
+        df_show['accuracy'].plot(kind='bar', ax=ax)
+        ax.set_title('Accuracy')
+        st.pyplot(fig)
     except Exception:
         st.error("results/model_comparison.csv not found. Run train_models.py")
 
@@ -186,6 +220,10 @@ with tabs[2]:
         if os.path.exists(rel('results/confusion_matrices.png')):
             st.image(rel('results/confusion_matrices.png'))
         df = pd.read_csv(rel('results/model_comparison.csv'), index_col=0)
+        available = df.index.tolist()
+        sel = st.multiselect("Filter models", available, default=available)
+        if sel:
+            df = df.loc[[m for m in available if m in sel]]
         st.dataframe(df.round(4))
     except Exception:
         st.error('Results not found. Run train_models.py')
@@ -194,246 +232,6 @@ with tabs[2]:
 with tabs[3]:
     st.header('About')
     st.markdown('Simple Streamlit app for evaluation and prediction.')
-import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
-import os
-from pathlib import Path
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_auc_score,
-    confusion_matrix,
-    classification_report,
-)
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-
-# Base directory for relative assets
-BASE_DIR = Path(__file__).resolve().parent
-
-
-def rel(path: str) -> str:
-    return str(BASE_DIR / path)
-
-
-st.set_page_config(page_title="Breast Cancer Classification Models",
-                   page_icon="🏥", layout="wide")
-
-
-st.markdown("""
-<style>
- .main { padding: 20px; }
- .metric-card { background-color: #f0f2f6; padding: 20px; border-radius: 10px; }
-</style>
-""", unsafe_allow_html=True)
-
-
-st.title("🏥 Breast Cancer Classification Models")
-st.markdown("**Multi-Model Comparison & Prediction System**")
-st.markdown("Binary classification of breast cancer tumors using 6 different ML models")
-
-
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📊 Model Comparison",
-    "🔮 Make Predictions",
-    "📈 Results & Analysis",
-    "ℹ️ About",
-])
-
-
-# TAB 1
-with tab1:
-    st.header("Model Performance Comparison")
-    try:
-        results_df = pd.read_csv(rel("results/model_comparison.csv"), index_col=0)
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            st.subheader("Performance Metrics Table")
-            st.dataframe(results_df.round(4), use_container_width=True)
-        with col2:
-            st.subheader("Key Statistics")
-            st.metric("Best Accuracy", f"{results_df['accuracy'].max():.4f}",
-                      results_df['accuracy'].idxmax())
-            st.metric("Best AUC", f"{results_df['auc'].max():.4f}",
-                      results_df['auc'].idxmax())
-            st.metric("Best F1-Score", f"{results_df['f1'].max():.4f}",
-                      results_df['f1'].idxmax())
-
-        st.subheader("Metric Comparison Charts")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            results_df['accuracy'].plot(kind='bar', ax=ax, color='steelblue')
-            ax.set_title('Accuracy')
-            st.pyplot(fig)
-        with c2:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            results_df['auc'].plot(kind='bar', ax=ax, color='coral')
-            ax.set_title('AUC')
-            st.pyplot(fig)
-        with c3:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            results_df['f1'].plot(kind='bar', ax=ax, color='mediumseagreen')
-            ax.set_title('F1')
-            st.pyplot(fig)
-    except FileNotFoundError:
-        st.error("Results file not found. Please run train_models.py first.")
-
-
-# TAB 2
-with tab2:
-    st.header("Make Predictions with Trained Models")
-    st.markdown("Upload a test CSV to evaluate models or enter a single sample below.")
-
-    uploaded_file = st.file_uploader("Upload CSV (features and optional 'target' column)", type=["csv"])
-
-    def _normalize_target(y):
-        try:
-            if y.dtype == object:
-                s = y.astype(str).str.strip().str.lower()
-                mapping = {"m": 0, "malignant": 0, "b": 1, "benign": 1, "0": 0, "1": 1}
-                s = s.map(lambda v: mapping.get(v, v))
-                return pd.to_numeric(s, errors='coerce').astype(int)
-            return pd.to_numeric(y, errors='coerce').astype(int)
-        except Exception:
-            return y
-
-    # Evaluation from uploaded CSV
-    if uploaded_file is not None:
-        try:
-            uploaded_df = pd.read_csv(uploaded_file)
-            st.subheader("Uploaded Data Preview")
-            st.dataframe(uploaded_df.head())
-
-            if 'target' in uploaded_df.columns:
-                y_true = uploaded_df['target']
-                X_eval = uploaded_df.drop(columns=['target'])
-            elif 'diagnosis' in uploaded_df.columns:
-                y_true = uploaded_df['diagnosis']
-                X_eval = uploaded_df.drop(columns=['diagnosis'])
-            else:
-                if os.path.exists(rel('data/y_test.csv')):
-                    y_true = pd.read_csv(rel('data/y_test.csv')).squeeze()
-                    X_eval = uploaded_df
-                else:
-                    st.error("No target column and data/y_test.csv not found. Cannot evaluate.")
-                    X_eval = None
-                    y_true = None
-
-            if X_eval is not None:
-                y_true = _normalize_target(y_true)
-
-                model_options = [
-                    "Logistic Regression", "Decision Tree", "KNN",
-                    "Naive Bayes", "Random Forest", "XGBoost"
-                ]
-
-                models_selected = st.multiselect("Select model(s) to evaluate", model_options, default=model_options)
-
-                if st.button("Evaluate on uploaded data"):
-                    try:
-                        scaler = joblib.load(rel('model/scaler.pkl'))
-                        models_dict = {
-                            "Logistic Regression": joblib.load(rel('model/logistic_regression_model.pkl')),
-                            "Decision Tree": joblib.load(rel('model/decision_tree_model.pkl')),
-                            "KNN": joblib.load(rel('model/knn_model.pkl')),
-                            "Naive Bayes": joblib.load(rel('model/naive_bayes_model.pkl')),
-                            "Random Forest": joblib.load(rel('model/random_forest_model.pkl')),
-                            "XGBoost": joblib.load(rel('model/xgboost_model.pkl')),
-                        }
-
-                        try:
-                            X_scaled = scaler.transform(X_eval)
-                        except Exception:
-                            X_scaled = X_eval
-
-                        eval_results = {}
-                        for name, model in models_dict.items():
-                            if len(models_selected) > 0 and name not in models_selected:
-                                continue
-                            try:
-                                y_pred = model.predict(X_scaled)
-                                y_prob = model.predict_proba(X_scaled)[:, 1]
-                            except Exception:
-                                y_pred = model.predict(X_eval)
-                                try:
-                                    y_prob = model.predict_proba(X_eval)[:, 1]
-                                except Exception:
-                                    y_prob = np.zeros(len(y_pred))
-
-                            eval_results[name] = {
-                                'accuracy': accuracy_score(y_true, y_pred),
-                                'precision': precision_score(y_true, y_pred, zero_division=0),
-                                'recall': recall_score(y_true, y_pred, zero_division=0),
-                                'f1': f1_score(y_true, y_pred, zero_division=0),
-                                'auc': (roc_auc_score(y_true, y_prob) if len(y_prob) == len(y_pred) else np.nan),
-                                'y_pred': y_pred,
-                            }
-
-                        res_df = pd.DataFrame.from_dict(eval_results, orient='index').drop(columns=['y_pred'])
-                        st.subheader('Evaluation Metrics')
-                        st.dataframe(res_df.round(4))
-
-                        for name, v in eval_results.items():
-                            st.subheader(f"Confusion Matrix: {name}")
-                            cm = confusion_matrix(y_true, v['y_pred'])
-                            fig, ax = plt.subplots()
-                            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
-                            ax.set_xlabel('Predicted')
-                            ax.set_ylabel('Actual')
-                            st.pyplot(fig)
-                            st.text(classification_report(y_true, v['y_pred'], zero_division=0))
-
-                    except FileNotFoundError as e:
-                        st.error(f"Model files not found: {e}")
-
-        except Exception as e:
-            st.error(f"Failed to read uploaded file: {e}")
-
-
-    # Single-sample input and prediction
-    try:
-        X_test = pd.read_csv(rel('data/X_test.csv'))
-        feature_names = X_test.columns.tolist()
-        st.subheader('Feature Input (single sample)')
-        cols = st.columns(3)
-        user_input = {}
-        for i, feat in enumerate(feature_names):
-            col = cols[i % 3]
-            with col:
-                minv = float(X_test[feat].min())
-                maxv = float(X_test[feat].max())
-                meanv = float(X_test[feat].mean())
-                step = (maxv - minv) / 100 if maxv > minv else 0.01
-                user_input[feat] = st.slider(feat, min_value=minv, max_value=maxv, value=meanv, step=step)
-
-        model_options = ["Logistic Regression", "Decision Tree", "KNN", "Naive Bayes", "Random Forest", "XGBoost"]
-        models_to_predict = st.multiselect('Select model(s) for prediction', model_options, default=model_options)
-
-        if st.button('Get Predictions'):
-            try:
-                scaler = joblib.load(rel('model/scaler.pkl'))
-                input_df = pd.DataFrame([user_input])
-                try:
-                    input_scaled = scaler.transform(input_df)
-                except Exception:
-                    input_scaled = input_df
-
-                models_dict = {
-                    'Logistic Regression': joblib.load(rel('model/logistic_regression_model.pkl')),
-                    'Decision Tree': joblib.load(rel('model/decision_tree_model.pkl')),
-                    'KNN': joblib.load(rel('model/knn_model.pkl')),
-                    'Naive Bayes': joblib.load(rel('model/naive_bayes_model.pkl')),
-                    'Random Forest': joblib.load(rel('model/random_forest_model.pkl')),
-                    'XGBoost': joblib.load(rel('model/xgboost_model.pkl')),
-                }
-
                 st.subheader('Model Predictions')
                 out_cols = st.columns(3)
                 preds = {}
